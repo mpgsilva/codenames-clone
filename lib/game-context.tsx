@@ -149,6 +149,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [spymasterMode, setSpymasterMode] = useState(true)
+  const refreshInFlightRef = useRef(false)
 
   useEffect(() => {
     setPlayerId(getStoredPlayerId())
@@ -536,4 +537,3 @@ export function useGame() {
 }
 
 export type { CardType }
-  const refreshInFlightRef = useRef(false)
