@@ -16,6 +16,11 @@ import {
 
 const TURN_DURATION_SECONDS = 120
 const STALE_ROOM_MS = 1000 * 60 * 60 * 8
+const ROOM_TTL_SECONDS = 60 * 60 * 8
+
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN
+const REDIS_ENABLED = Boolean(REDIS_URL && REDIS_TOKEN)
 
 type InternalRoom = Omit<RoomSnapshot, "players"> & {
   players: Map<string, Player>
@@ -99,6 +104,123 @@ function now() {
   return Date.now()
 }
 
+function roomKey(roomId: string) {
+  return `codenames:room:${roomId}`
+}
+
+async function runRedisCommand<T>(command: Array<string | number>) {
+  if (!REDIS_ENABLED) {
+    throw new Error("Redis não configurado.")
+  }
+
+  const response = await fetch(REDIS_URL!, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${REDIS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(command),
+    cache: "no-store",
+  })
+
+  if (!response.ok) {
+    throw new Error("Falha ao acessar o armazenamento remoto.")
+  }
+
+  const data = (await response.json()) as { result?: T; error?: string }
+  if (data.error) {
+    throw new Error(data.error)
+  }
+
+  return (data.result ?? null) as T | null
+}
+
+export async function getStorageHealth() {
+  if (!REDIS_ENABLED) {
+    return {
+      storageMode: "memory" as const,
+      redisConfigured: false,
+      redisOk: false,
+    }
+  }
+
+  try {
+    const ping = await runRedisCommand<string>(["PING"])
+    return {
+      storageMode: "redis" as const,
+      redisConfigured: true,
+      redisOk: ping === "PONG",
+    }
+  } catch {
+    return {
+      storageMode: "redis" as const,
+      redisConfigured: true,
+      redisOk: false,
+    }
+  }
+}
+
+function roomToSnapshot(room: InternalRoom): RoomSnapshot {
+  return {
+    id: room.id,
+    hostPlayerId: room.hostPlayerId,
+    createdAt: room.createdAt,
+    updatedAt: room.updatedAt,
+    players: Array.from(room.players.values()).sort((a, b) => a.joinedAt - b.joinedAt),
+    game: room.game,
+  }
+}
+
+function snapshotToInternal(snapshot: RoomSnapshot): InternalRoom {
+  return {
+    ...snapshot,
+    players: new Map(snapshot.players.map((player) => [player.id, player])),
+  }
+}
+
+function buildView(room: InternalRoom, playerId?: string): RoomView {
+  return {
+    room: roomToSnapshot(room),
+    me: playerId ? room.players.get(playerId) ?? null : null,
+  }
+}
+
+async function roomExists(roomId: string) {
+  if (!REDIS_ENABLED) {
+    return rooms.has(roomId)
+  }
+
+  const exists = await runRedisCommand<number>(["EXISTS", roomKey(roomId)])
+  return Boolean(exists)
+}
+
+async function loadRoom(roomId: string): Promise<InternalRoom | null> {
+  if (!REDIS_ENABLED) {
+    return rooms.get(roomId) ?? null
+  }
+
+  const raw = await runRedisCommand<string>(["GET", roomKey(roomId)])
+  if (!raw) {
+    return null
+  }
+
+  try {
+    const snapshot = JSON.parse(raw) as RoomSnapshot
+    return snapshotToInternal(snapshot)
+  } catch {
+    return null
+  }
+}
+
+async function saveRoom(room: InternalRoom) {
+  if (!REDIS_ENABLED) {
+    rooms.set(room.id, room)
+    return
+  }
+
+  await runRedisCommand(["SET", roomKey(room.id), JSON.stringify(roomToSnapshot(room)), "EX", ROOM_TTL_SECONDS])
+}
+
 function defaultGame(blueTeamName: string, redTeamName: string, gridSize: number): GameSnapshot {
   return {
     cards: [],
@@ -121,56 +243,23 @@ function defaultGame(blueTeamName: string, redTeamName: string, gridSize: number
   }
 }
 
-function pushSelectionToLatestClue(room: InternalRoom, team: Team, card: GameCard) {
-  const latest = room.game.clueHistory[room.game.clueHistory.length - 1]
-  if (!latest) {
-    return
-  }
-  if (latest.team !== team) {
-    return
-  }
-  latest.selections.push({
-    word: card.word,
-    type: card.type,
-  })
-}
-
-function getLatestClueForTeam(room: InternalRoom, team: Team) {
-  const latest = room.game.clueHistory[room.game.clueHistory.length - 1]
-  if (!latest || latest.team !== team) {
-    return null
-  }
-  return latest
-}
-
-function roomToSnapshot(room: InternalRoom): RoomSnapshot {
-  return {
-    id: room.id,
-    hostPlayerId: room.hostPlayerId,
-    createdAt: room.createdAt,
-    updatedAt: room.updatedAt,
-    players: Array.from(room.players.values()).sort((a, b) => a.joinedAt - b.joinedAt),
-    game: room.game,
-  }
-}
-
-function buildView(room: InternalRoom, playerId?: string): RoomView {
-  return {
-    room: roomToSnapshot(room),
-    me: playerId ? room.players.get(playerId) ?? null : null,
-  }
-}
-
 function randomRoomId() {
   const chars = "0123456789"
   let id = ""
   for (let i = 0; i < 6; i++) {
     id += chars[Math.floor(Math.random() * chars.length)]
   }
-  if (rooms.has(id)) {
-    return randomRoomId()
-  }
   return id
+}
+
+async function createUniqueRoomId() {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const id = randomRoomId()
+    if (!(await roomExists(id))) {
+      return id
+    }
+  }
+  throw new Error("Não foi possível gerar um código de sala único.")
 }
 
 function generateCards(gridSize: number): { cards: GameCard[]; firstTeam: Team } {
@@ -202,12 +291,8 @@ function generateCards(gridSize: number): { cards: GameCard[]; firstTeam: Team }
   }
 }
 
-function hasActiveClue(room: InternalRoom) {
-  return room.game.clueTeam === room.game.currentTurn && room.game.currentClue.trim().length > 0
-}
-
-function requireRoom(roomId: string): InternalRoom {
-  const room = rooms.get(roomId)
+async function requireRoom(roomId: string): Promise<InternalRoom> {
+  const room = await loadRoom(roomId)
   if (!room) {
     throw new Error("Sala não encontrada.")
   }
@@ -222,23 +307,17 @@ function requirePlayer(room: InternalRoom, playerId: string): Player {
   return player
 }
 
-function cleanupRooms() {
+function cleanupLocalRooms() {
+  if (REDIS_ENABLED) {
+    return
+  }
+
   const threshold = now() - STALE_ROOM_MS
   for (const [id, room] of rooms.entries()) {
     if (room.updatedAt < threshold) {
       rooms.delete(id)
     }
   }
-}
-
-function tickTurnTimer(room: InternalRoom) {
-  if (!room.game.gameStarted || room.game.gameOver || !room.game.turnDeadline) {
-    return
-  }
-  if (room.game.turnDeadline > now()) {
-    return
-  }
-  switchTurn(room)
 }
 
 function switchTurn(room: InternalRoom) {
@@ -252,6 +331,16 @@ function switchTurn(room: InternalRoom) {
       card.markedByPlayerIds = []
     }
   }
+}
+
+function tickTurnTimer(room: InternalRoom) {
+  if (!room.game.gameStarted || room.game.gameOver || !room.game.turnDeadline) {
+    return
+  }
+  if (room.game.turnDeadline > now()) {
+    return
+  }
+  switchTurn(room)
 }
 
 function countSpymasters(room: InternalRoom, team: Team) {
@@ -277,10 +366,36 @@ function assertReadyToStart(room: InternalRoom) {
   }
 }
 
-export function createRoom(input: CreateRoomInput): RoomView {
-  cleanupRooms()
+function pushSelectionToLatestClue(room: InternalRoom, team: Team, card: GameCard) {
+  const latest = room.game.clueHistory[room.game.clueHistory.length - 1]
+  if (!latest) {
+    return
+  }
+  if (latest.team !== team) {
+    return
+  }
+  latest.selections.push({
+    word: card.word,
+    type: card.type,
+  })
+}
 
-  const roomId = randomRoomId()
+function getLatestClueForTeam(room: InternalRoom, team: Team) {
+  const latest = room.game.clueHistory[room.game.clueHistory.length - 1]
+  if (!latest || latest.team !== team) {
+    return null
+  }
+  return latest
+}
+
+function hasActiveClue(room: InternalRoom) {
+  return room.game.clueTeam === room.game.currentTurn && room.game.currentClue.trim().length > 0
+}
+
+export async function createRoom(input: CreateRoomInput): Promise<RoomView> {
+  cleanupLocalRooms()
+
+  const roomId = await createUniqueRoomId()
   const createdAt = now()
 
   const creator: Player = {
@@ -301,15 +416,15 @@ export function createRoom(input: CreateRoomInput): RoomView {
     game: defaultGame(input.blueTeamName, input.redTeamName, input.gridSize),
   }
 
-  rooms.set(room.id, room)
+  await saveRoom(room)
   return buildView(room, creator.id)
 }
 
-export function joinRoom(input: JoinRoomInput): RoomView {
-  cleanupRooms()
+export async function joinRoom(input: JoinRoomInput): Promise<RoomView> {
+  cleanupLocalRooms()
 
   const roomId = input.roomId.trim()
-  const room = requireRoom(roomId)
+  const room = await requireRoom(roomId)
 
   const existing = room.players.get(input.playerId)
   const currentTime = now()
@@ -328,15 +443,19 @@ export function joinRoom(input: JoinRoomInput): RoomView {
     })
   }
 
-  room.updatedAt = currentTime
   tickTurnTimer(room)
+  room.updatedAt = currentTime
+  await saveRoom(room)
+
   return buildView(room, input.playerId)
 }
 
-export function getRoom(roomId: string, playerId?: string): RoomView {
-  cleanupRooms()
+export async function getRoom(roomId: string, playerId?: string): Promise<RoomView> {
+  cleanupLocalRooms()
 
-  const room = requireRoom(roomId.toUpperCase().trim())
+  const normalizedRoomId = roomId.trim()
+  const room = await requireRoom(normalizedRoomId)
+
   tickTurnTimer(room)
 
   if (playerId) {
@@ -347,11 +466,13 @@ export function getRoom(roomId: string, playerId?: string): RoomView {
   }
 
   room.updatedAt = now()
+  await saveRoom(room)
+
   return buildView(room, playerId)
 }
 
-export function updatePlayer(input: UpdatePlayerInput): RoomView {
-  const room = requireRoom(input.roomId.toUpperCase().trim())
+export async function updatePlayer(input: UpdatePlayerInput): Promise<RoomView> {
+  const room = await requireRoom(input.roomId.trim())
   const actor = requirePlayer(room, input.playerId)
   const target = requirePlayer(room, input.targetPlayerId ?? input.playerId)
 
@@ -397,11 +518,13 @@ export function updatePlayer(input: UpdatePlayerInput): RoomView {
   }
 
   room.updatedAt = now()
+  await saveRoom(room)
+
   return buildView(room, input.playerId)
 }
 
-export function applyGameAction(input: GameActionInput): RoomView {
-  const room = requireRoom(input.roomId.toUpperCase().trim())
+export async function applyGameAction(input: GameActionInput): Promise<RoomView> {
+  const room = await requireRoom(input.roomId.trim())
   const actor = requirePlayer(room, input.playerId)
 
   tickTurnTimer(room)
@@ -613,5 +736,7 @@ export function applyGameAction(input: GameActionInput): RoomView {
   }
 
   room.updatedAt = now()
+  await saveRoom(room)
+
   return buildView(room, input.playerId)
 }

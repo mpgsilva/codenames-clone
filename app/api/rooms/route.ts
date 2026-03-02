@@ -9,7 +9,7 @@ export async function POST(request: Request) {
     const body = await request.json()
 
     if (body.kind === "create") {
-      const roomView = createRoom({
+      const roomView = await createRoom({
         playerId: body.playerId,
         playerName: body.playerName,
         blueTeamName: body.blueTeamName,
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     }
 
     if (body.kind === "join") {
-      const roomView = joinRoom({
+      const roomView = await joinRoom({
         roomId: body.roomId,
         playerId: body.playerId,
         playerName: body.playerName,

@@ -14,7 +14,7 @@ export async function GET(request: Request, { params }: Params) {
     const url = new URL(request.url)
     const playerId = url.searchParams.get("playerId") ?? undefined
 
-    return NextResponse.json(getRoom(roomId, playerId))
+    return NextResponse.json(await getRoom(roomId, playerId))
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Erro inesperado." },
@@ -28,7 +28,7 @@ export async function PATCH(request: Request, { params }: Params) {
     const { roomId } = await params
     const body = await request.json()
 
-    const roomView = updatePlayer({
+    const roomView = await updatePlayer({
       roomId,
       playerId: body.playerId,
       targetPlayerId: body.targetPlayerId,
@@ -54,7 +54,7 @@ export async function POST(request: Request, { params }: Params) {
     const { roomId } = await params
     const body = await request.json()
 
-    const roomView = applyGameAction({
+    const roomView = await applyGameAction({
       ...body,
       roomId,
     })
