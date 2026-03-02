@@ -335,12 +335,13 @@ function switchTurn(room: InternalRoom) {
 
 function tickTurnTimer(room: InternalRoom) {
   if (!room.game.gameStarted || room.game.gameOver || !room.game.turnDeadline) {
-    return
+    return false
   }
   if (room.game.turnDeadline > now()) {
-    return
+    return false
   }
   switchTurn(room)
+  return true
 }
 
 function countSpymasters(room: InternalRoom, team: Team) {
@@ -456,17 +457,11 @@ export async function getRoom(roomId: string, playerId?: string): Promise<RoomVi
   const normalizedRoomId = roomId.trim()
   const room = await requireRoom(normalizedRoomId)
 
-  tickTurnTimer(room)
-
-  if (playerId) {
-    const player = room.players.get(playerId)
-    if (player) {
-      player.lastSeenAt = now()
-    }
+  const timerChangedTurn = tickTurnTimer(room)
+  if (timerChangedTurn) {
+    room.updatedAt = now()
+    await saveRoom(room)
   }
-
-  room.updatedAt = now()
-  await saveRoom(room)
 
   return buildView(room, playerId)
 }
