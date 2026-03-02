@@ -1,6 +1,6 @@
 ﻿"use client"
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 
 import {
   type CardType,
@@ -157,7 +157,12 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const roomId = room?.id ?? null
 
   const syncRoomView = useCallback((data: { room: RoomSnapshot; me: Player | null }) => {
-    setRoom(data.room)
+    setRoom((prev) => {
+      if (prev && prev.id === data.room.id && prev.updatedAt > data.room.updatedAt) {
+        return prev
+      }
+      return data.room
+    })
     setMe(data.me)
   }, [])
 
@@ -167,11 +172,17 @@ export function GameProvider({ children }: { children: ReactNode }) {
     }
 
     try {
+      if (refreshInFlightRef.current) {
+        return
+      }
+      refreshInFlightRef.current = true
       const response = await fetch(`/api/rooms/${roomId}?playerId=${playerId}`, { cache: "no-store" })
       const data = await readJsonOrThrow(response)
       syncRoomView(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Falha ao atualizar sala")
+    } finally {
+      refreshInFlightRef.current = false
     }
   }, [roomId, playerId, syncRoomView])
 
@@ -423,6 +434,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const canGiveClue =
     !!room?.game.gameStarted &&
     !room.game.gameOver &&
+    !hasActiveClue &&
     !!me &&
     me.team === room.game.currentTurn &&
     me.role === "spymaster"
@@ -524,3 +536,4 @@ export function useGame() {
 }
 
 export type { CardType }
+  const refreshInFlightRef = useRef(false)

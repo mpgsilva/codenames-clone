@@ -667,6 +667,9 @@ export async function applyGameAction(input: GameActionInput): Promise<RoomView>
     if (actor.role !== "spymaster") {
       throw new Error("Somente o espião mestre pode enviar dica.")
     }
+    if (hasActiveClue(room)) {
+      throw new Error("Já existe uma dica ativa neste turno.")
+    }
 
     const clue = (input.clue ?? "").trim().slice(0, 32)
     const letterCount = (clue.match(/[A-Za-zÀ-ÖØ-öø-ÿ]/g) ?? []).length

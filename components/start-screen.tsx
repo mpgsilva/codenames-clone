@@ -99,8 +99,7 @@ export function StartScreen() {
   }
 
   const handleTeamChange = async (team: "blue" | "red" | "spectator") => {
-    const nextRole = team === "spectator" ? "operative" : currentRole
-    await updateMySetup(team, nextRole)
+    await updateMySetup(team, "operative")
   }
 
   const handleRoleChange = async (role: "spymaster" | "operative") => {
